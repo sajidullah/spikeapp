@@ -11,22 +11,29 @@ class TerminalColor:
 
 # Initialize the parameters
 confThreshold = 0.5  # Confidence threshold
-nmsThreshold = 0.7   # Non-maximum suppression threshold
+nmsThreshold = 0.4   # Non-maximum suppression threshold
 inpWidth = 608       # Width of network's input image
 inpHeight = 608      # Height of network's input image
 
 # Load command line arguments
 input_folder = sys.argv[1]  # Folder containing images to process
 output_folder = sys.argv[2] # Folder where processed images will be saved
+segmented_folder = os.path.join(output_folder, "segmented_images")  # Folder for segmented images
 classesFile = sys.argv[3]
 modelConfiguration = sys.argv[4]
 modelWeights = sys.argv[5]
 
-# Load names of classes and find the index for 'spike'
+# Ensure output folder and segmented folder exist
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+if not os.path.exists(segmented_folder):
+    os.makedirs(segmented_folder)
+
+# Load names of classes
 classes = None
 with open(classesFile, 'rt') as f:
     classes = f.read().rstrip('\n').split('\n')
-spike_index = classes.index('spike')  # Adjust this if 'spike' is not the correct name
+spike_index = classes.index('spike')  # Make sure 'spike' is the correct class name
 
 # Load the network
 net = cv.dnn.readNetFromDarknet(modelConfiguration, modelWeights)
@@ -48,19 +55,21 @@ def getOutputsNames(net):
     else:
         return [layersNames[i[0] - 1] for i in outLayers]
 
-# Draw the predicted bounding box and write coordinates to log file
-def drawPred(classId, conf, left, top, right, bottom, log_file_path, image_name):
+# Draw the predicted bounding box, write coordinates to log file, and segment the spike
+def drawPred(classId, conf, left, top, right, bottom, frame, log_file_path, image_name):
     if classId == spike_index:
+        # Draw bounding box on the original image
         cv.rectangle(frame, (left, top), (right, bottom), (255, 178, 50), 3)
         bbox_details = f'{image_name} {left} {top} {right} {bottom}\n'
         with open(log_file_path, "a") as f:
             f.write(bbox_details)
+        # Segment and save the spike
+        segmented_image = frame[top:bottom, left:right]
+        cv.imwrite(os.path.join(segmented_folder, image_name[:-4] + '_segmented.png'), segmented_image)
 
-# Remove the bounding boxes with low confidence using non-maxima suppression
+# Function for post-processing, including NMS
 def postprocess(frame, outs, log_file_path, image_name):
-    frameHeight = frame.shape[0]
-    frameWidth = frame.shape[1]
-
+    frameHeight, frameWidth = frame.shape[:2]
     classIds = []
     confidences = []
     boxes = []
@@ -81,19 +90,24 @@ def postprocess(frame, outs, log_file_path, image_name):
                 boxes.append([left, top, width, height])
 
     indices = cv.dnn.NMSBoxes(boxes, confidences, confThreshold, nmsThreshold)
+    
+    # Ensure indices can be iterated over even if it's empty or in an unexpected format
+    if isinstance(indices, tuple):
+        indices = indices[0] if len(indices) > 0 else []
+    elif indices is None or len(indices) == 0:
+        indices = []
+    
+    # Flatten the list if it's an array of arrays
+    if len(indices) > 0 and isinstance(indices[0], (list, np.ndarray)):
+        indices = [i[0] for i in indices]
+    
     for i in indices:
-        if isinstance(i, (np.ndarray, list)) and len(i) > 0:
-            i = i[0]
         box = boxes[i]
         left = box[0]
         top = box[1]
         width = box[2]
         height = box[3]
-        drawPred(classIds[i], confidences[i], left, top, left + width, top + height, log_file_path, image_name)
-
-# Ensure output folder exists
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
+        drawPred(classIds[i], confidences[i], left, top, left + width, top + height, frame, log_file_path, image_name)
 
 # Define the path for the log file
 log_file_path = os.path.join(output_folder, 'bounding_box.txt')
@@ -102,10 +116,7 @@ log_file_path = os.path.join(output_folder, 'bounding_box.txt')
 for file_name in os.listdir(input_folder):
     image_path = os.path.join(input_folder, file_name)
     if os.path.isfile(image_path) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-        frame = cv.imread(image_path, cv.IMREAD_UNCHANGED)
-        if frame.shape[2] == 4:
-            frame = cv.cvtColor(frame, cv.COLOR_BGRA2BGR)
-
+        frame = cv.imread(image_path)
         blob = cv.dnn.blobFromImage(frame, 1/255, (inpWidth, inpHeight), [0,0,0], 1, crop=False)
         net.setInput(blob)
         outs = net.forward(getOutputsNames(net))
@@ -113,5 +124,5 @@ for file_name in os.listdir(input_folder):
         postprocess(frame, outs, log_file_path, file_name)
 
         output_file_path = os.path.join(output_folder, file_name[:-4] + '_prediction.png')
-        cv.imwrite(output_file_path, frame.astype(np.uint8))
-        print(TerminalColor.BLUE + f"Processing of {file_name} complete. Output saved to: {output_file_path}")
+        cv.imwrite(output_file_path, frame)
+        print(TerminalColor.BLUE + f"Processing of {file_name} complete. Output saved to: {output_file_path}" + TerminalColor.END)
